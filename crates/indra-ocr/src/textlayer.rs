@@ -9,6 +9,10 @@ pub const MAX_BAD_CHAR_FRAC: f64 = 0.005;
 pub const MAX_NO_INK_LINE_FRAC: f64 = 0.03;
 /// Grey level below which a pixel counts as ink.
 pub const DARK: u8 = 160;
+/// Grey range within a run's box that counts as ink too: small light-grey text
+/// (a footer) renders no darker than ~200 at the check's 1 px/pt, on a ~247
+/// panel; text drawn nowhere leaves its box flat.
+pub const INK_CONTRAST: u8 = 32;
 pub const MIN_MODEL_AGREEMENT: f64 = 0.85;
 /// TextLayer::reason when the layer's codes are not text.
 pub const BROKEN_FONT_MAP: &str = "broken font map";
@@ -19,29 +23,33 @@ pub fn bad_char_count(text: &str) -> usize {
 }
 
 /// Moves upward in content order that do not go to a column on the right.
-pub fn order_backtracks(boxes: &[[f32; 4]]) -> usize {
+pub fn order_backtracks(boxes: &[[f32; 4]]) -> Vec<usize> {
     if boxes.len() < 3 {
-        return 0;
+        return vec![];
     }
     let h = median_f32(&boxes.iter().map(|b| b[3] - b[1]).collect::<Vec<_>>()) as f64;
-    boxes
-        .windows(2)
-        .filter(|w| {
-            let (a, b) = (w[0], w[1]);
+    (0..boxes.len() - 1)
+        .filter(|&i| {
+            let (a, b) = (boxes[i], boxes[i + 1]);
             b[1] < a[1] - (0.5 * h) as f32 && b[0] < a[2] - h as f32
         })
-        .count()
+        .collect()
 }
 
 /// Is the content order a reading order? Few upward moves that are not column
-/// changes, and the order model agrees with most consecutive pairs.
+/// changes, none of them against the order model (a footer drawn before the
+/// text above it), and the model agrees with most consecutive pairs.
 pub fn pdf_order_coherent(boxes: &[[f32; 4]], pair_logits: Option<&Mat>) -> bool {
-    if order_backtracks(boxes) > 1usize.max((0.02 * boxes.len() as f64) as usize) {
+    let back = order_backtracks(boxes);
+    if back.len() > 1usize.max((0.02 * boxes.len() as f64) as usize) {
         return false;
     }
     let Some(l) = pair_logits else { return true };
     if boxes.len() < 3 {
         return true;
+    }
+    if back.iter().any(|&i| l.at(i, i + 1) <= 0.0) {
+        return false;
     }
     let n = boxes.len() - 1;
     let agree = (0..n).filter(|&i| l.at(i, i + 1) > 0.0).count();
@@ -178,10 +186,39 @@ mod pdf {
                 ink.iter().map(|v| v[2]).fold(f64::NEG_INFINITY, f64::max),
                 ink.iter().map(|v| v[3]).fold(f64::NEG_INFINITY, f64::max),
             ];
+            let seg = drop_tracking_spaces(seg);
             let text = squash_spaces(&seg.iter().map(|e| e.0).collect::<String>());
             runs.push(TextLine { bbox, text, chars: seg });
         }
         Ok((runs, st))
+    }
+
+    /// Letter-spaced (tracked) text: pdfium puts a space between letters whose
+    /// gap exceeds its threshold, so "RESUMO" reads "R E S U M O". In a run whose
+    /// usual gap between letters is wide for its height, a space whose letters
+    /// sit no further apart than that gap plus a fifth of the height goes.
+    pub(crate) fn drop_tracking_spaces(seg: Vec<(char, [f64; 4])>) -> Vec<(char, [f64; 4])> {
+        let ink: Vec<usize> = (0..seg.len()).filter(|&i| !is_space(seg[i].0)).collect();
+        if ink.len() < 5 {
+            return seg;
+        }
+        let gaps: Vec<f32> = ink.windows(2).map(|w| (seg[w[1]].1[0] - seg[w[0]].1[2]) as f32).collect();
+        let hs: Vec<f32> = ink.iter().map(|&i| (seg[i].1[3] - seg[i].1[1]) as f32).collect();
+        let (gap, h) = (median_f32(&gaps) as f64, median_f32(&hs) as f64);
+        // ponytail: fixed ratios tuned on tracked caps headings; plain text has gap/h near 0.1
+        if gap <= 0.25 * h {
+            return seg;
+        }
+        let mut keep = vec![true; seg.len()];
+        // Spurious spaces sit within 0.1 h of the usual gap; word spaces in
+        // lightly tracked caps ("PARA AGREGAR") already 0.35 h beyond it.
+        for w in ink.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            if b > a + 1 && seg[b].1[0] - seg[a].1[2] <= gap + 0.2 * h {
+                keep[a + 1..b].iter_mut().for_each(|k| *k = false);
+            }
+        }
+        seg.into_iter().zip(keep).filter(|e| e.1).map(|e| e.0).collect()
     }
 
     /// Share of runs whose box holds no dark pixel in ``gray`` (``scale`` px/pt).
@@ -192,16 +229,17 @@ mod pdf {
             let [x0, y0, x1, y1] = ln.bbox;
             let (r0, r1) = (((y0 * scale) as i64).max(0), (((y1 * scale) as i64) + 1).min(h));
             let (c0, c1) = (((x0 * scale) as i64).max(0), (((x1 * scale) as i64) + 1).min(w));
-            let mut any = false;
+            let (mut lo, mut hi) = (u8::MAX, u8::MIN);
             'rows: for y in r0..r1 {
                 for x in c0..c1 {
-                    if gray.at(x as usize, y as usize) < DARK {
-                        any = true;
+                    let v = gray.at(x as usize, y as usize);
+                    (lo, hi) = (lo.min(v), hi.max(v));
+                    if lo < DARK {
                         break 'rows;
                     }
                 }
             }
-            if !any {
+            if lo >= DARK && hi.saturating_sub(lo) < INK_CONTRAST {
                 empty += 1;
             }
         }
@@ -237,7 +275,57 @@ mod pdf {
     fn pct(x: f64) -> String {
         format!("{:.0}", x * 100.0)
     }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Letters `pitch` apart, `gap` between them, a space between words or
+        /// between every letter when `spaced`.
+        fn seg(words: &[&str], w: f64, gap: f64, word_gap: f64, spaced: bool) -> String {
+            let (mut out, mut x) = (vec![], 0.0);
+            for (k, wd) in words.iter().enumerate() {
+                if k > 0 {
+                    out.push((' ', [x, 0.0, x, 0.0]));
+                    x += word_gap - gap;
+                }
+                for (j, c) in wd.chars().enumerate() {
+                    if j > 0 && spaced {
+                        out.push((' ', [x, 0.0, x, 0.0]));
+                    }
+                    out.push((c, [x, 0.0, x + w, 6.0]));
+                    x += w + gap;
+                }
+            }
+            drop_tracking_spaces(out).iter().map(|e| e.0).collect()
+        }
+
+        #[test]
+        fn tracking_spaces() {
+            assert_eq!(seg(&["RESUMO", "EXECUTIVO"], 5.0, 2.3, 6.5, true), "RESUMO EXECUTIVO");
+            assert_eq!(seg(&["IB", "MGUARDIUM"], 5.0, 2.1, 2.2, false), "IBMGUARDIUM");
+            // lightly tracked caps keep their word spaces
+            assert_eq!(seg(&["PARA", "AGREGAR"], 5.0, 1.55, 3.6, false), "PARA AGREGAR");
+            // plain text keeps narrow word spaces
+            assert_eq!(seg(&["um", "dois", "tres"], 3.0, 0.4, 2.5, false), "um dois tres");
+        }
+    }
 }
 
 #[cfg(feature = "pdf")]
 pub use pdf::{extract_runs, no_ink_frac, read_text_layer};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backtrack_against_model() {
+        // a footer drawn first, then the two lines above it
+        let boxes = [[0.0, 90.0, 50.0, 95.0], [0.0, 10.0, 50.0, 15.0], [0.0, 20.0, 50.0, 25.0]];
+        let pairs = |back: f32| Mat::new(3, 3, vec![0., back, 0., 0., 0., 1., 0., 0., 0.]);
+        assert!(pdf_order_coherent(&boxes, None));
+        assert!(pdf_order_coherent(&boxes, Some(&pairs(1.0))));
+        assert!(!pdf_order_coherent(&boxes, Some(&pairs(-1.0))));
+    }
+}
