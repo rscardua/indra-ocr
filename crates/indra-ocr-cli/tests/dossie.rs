@@ -61,7 +61,9 @@ fn dossie_markdown() {
 
     // wrapped cells: one table row per row, the cell text whole
     has("<tr><th>COMPONENTE INTEGRADO DE RESULTADO</th><th>O QUE A IBM ENTREGA (EMBARCADO)</th>");
-    has("<td>Antifraude e detecção (2ª linha de defesa)</td><td>DAM em tempo real; detecção de anomalia/outlier por ML; alerta por política</td>");
+    has(
+        "<td>Antifraude e detecção (2ª linha de defesa)</td><td>DAM em tempo real; detecção de anomalia/outlier por ML; alerta por política</td>",
+    );
     has("<td>Conformidade e tratamento lícito do dado</td>");
     lacks("<tr><td>defesa)</td>");
 

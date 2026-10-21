@@ -412,6 +412,16 @@ fn section_md(lines: &[&str]) -> String {
 /// Markdown of a list block's lines, one item per line. Items start at a
 /// marker, or, under a hanging indent (bullets drawn as graphics, not text),
 /// at a line on the left edge; those get a "- ".
+/// Lines in a hanging indent: the first on the left edge, others indented
+/// under it, and two or more on the edge (a first-line indent starts indented).
+fn hanging_indent(boxes: &[[f32; 4]]) -> bool {
+    let Some(first) = boxes.first() else { return false };
+    let x_min = boxes.iter().map(|b| b[0]).fold(f32::INFINITY, f32::min);
+    let indent = 0.5 * median_height(boxes);
+    let edge = boxes.iter().filter(|b| b[0] <= x_min + indent).count();
+    first[0] <= x_min + indent && edge >= 2 && edge < boxes.len()
+}
+
 fn list_md(boxes: &[[f32; 4]], lines: &[&str]) -> String {
     let x_min = boxes.iter().map(|b| b[0]).fold(f32::INFINITY, f32::min);
     let indent = 0.5 * median_height(boxes);
@@ -429,16 +439,15 @@ fn list_md(boxes: &[[f32; 4]], lines: &[&str]) -> String {
     let mut marks: Vec<String> = items.iter().map(|(dash, _)| if *dash { "- ".into() } else { String::new() }).collect();
     // Drawn bullets that OCR reads as one character ("d" for a circled check,
     // "©" "@" "3" for circled digits) before every dashed item.
-    let icons: Vec<Option<char>> = texts
-        .iter()
-        .map(|t| t.split_once(' ').map(|(a, _)| a).filter(|a| a.chars().count() == 1).and_then(|a| a.chars().next()))
-        .collect();
+    let icons: Vec<Option<char>> =
+        texts.iter().map(|t| t.split_once(' ').map(|(a, _)| a).filter(|a| a.chars().count() == 1).and_then(|a| a.chars().next())).collect();
     let dashed: Vec<usize> = (0..items.len()).filter(|&k| items[k].0).collect();
     if dashed.len() > 1 && dashed.iter().all(|&k| icons[k].is_some()) {
         let ic: Vec<char> = dashed.iter().map(|&k| icons[k].unwrap()).collect();
         let numbered = ic.iter().enumerate().any(|(n, c)| c.to_digit(10) == Some(n as u32 + 1));
         // ponytail: one-letter words that can open every item ("o", "a", "I") stay
-        let icon = numbered || ic.iter().all(|c| !c.is_alphanumeric()) || (ic.iter().all(|c| *c == ic[0]) && !"aAeEoOéÉàÀyYI".contains(ic[0]));
+        let icon =
+            numbered || ic.iter().all(|c| !c.is_alphanumeric()) || (ic.iter().all(|c| *c == ic[0]) && !"aAeEoOéÉàÀyYI".contains(ic[0]));
         if icon {
             for (n, &k) in dashed.iter().enumerate() {
                 texts[k] = texts[k].split_once(' ').unwrap().1.to_string();
@@ -509,6 +518,10 @@ pub fn page_markdown(
             parts.push(table_html(&cbx, &ctx));
         } else if c == list {
             parts.push(list_md(&bb, &tb));
+        } else if hanging_indent(&bb) {
+            // The layout head can call such a block Text (its call flips on a few
+            // pixels of line box); the hanging indent still marks the items.
+            parts.push(list_md(&bb, &tb));
         } else {
             parts.push(join_lines(&tb));
         }
@@ -526,6 +539,16 @@ mod tests {
         assert_eq!(join_lines(&["中文", "字符"]), "中文字符");
         assert_eq!(join_lines(&["a", " ", "b"]), "a b");
         assert_eq!(join_lines(&["FIDACTA", "."]), "FIDACTA.");
+    }
+
+    #[test]
+    fn hanging_blocks() {
+        let b = |x: f32, y: f32| [x, y, 100., y + 10.];
+        assert!(hanging_indent(&[b(0., 0.), b(8., 12.), b(0., 24.), b(8., 36.)]));
+        // a first-line indent, a single item, a flush paragraph
+        assert!(!hanging_indent(&[b(8., 0.), b(0., 12.), b(0., 24.)]));
+        assert!(!hanging_indent(&[b(0., 0.), b(8., 12.), b(8., 24.)]));
+        assert!(!hanging_indent(&[b(0., 0.), b(0., 12.), b(0., 24.)]));
     }
 
     #[test]

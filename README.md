@@ -9,7 +9,8 @@ CTC recognition, reading order, layout and markdown, for PDFs and images), with 
 - **Faster.** The native engine (`indra-engine`) runs every model with fused, CPU-dispatched kernels:
   about 2x the Python package's throughput on scanned pages, and 2-6x lower single-page latency.
 - **No Python, no PyTorch, no ONNX Runtime needed.** The native engine reads the weights straight from
-  the ONNX files. PDFs need the pdfium shared library; ONNX Runtime is optional (`--engine ort`).
+  the ONNX files. PDFs are read in pure Rust ([hayro](https://github.com/LaurenzV/hayro)); the pdfium
+  shared library is optional (feature `pdfium`), and so is ONNX Runtime (`--engine ort`).
 
 ## Crates
 
@@ -26,13 +27,15 @@ nix develop          # rust, pdfium, onnxruntime (sets PDFIUM_DYNAMIC_LIB_PATH, 
 cargo build --release
 ```
 
-Without Nix: any Rust >= 1.88, plus a pdfium build for PDFs (for example
+Without Nix: any Rust >= 1.92; nothing else for PDFs or images. ONNX Runtime is only needed for
+`--engine ort`, pdfium only with the `pdfium` feature (for example
 [pdfium-binaries](https://github.com/bblanchon/pdfium-binaries), or the `libpdfium.so` inside the
-`pypdfium2_raw` Python wheel). ONNX Runtime is only needed for `--engine ort`.
+`pypdfium2_raw` Python wheel).
 
-Cargo features of `indra-ocr`: `native` (the native engine), `ort` (ONNX Runtime), `pdf` (pdfium),
-`download` (models from Hugging Face). All are on by default; `--no-default-features --features native,pdf`
-builds without ONNX Runtime and without network code.
+Cargo features of `indra-ocr`: `native` (the native engine), `ort` (ONNX Runtime), `pdf` (PDFs, in pure
+Rust), `download` (models from Hugging Face). All are on by default; `--no-default-features --features native,pdf`
+builds without ONNX Runtime and without network code. `pdfium` (off by default) reads PDFs through the
+pdfium library instead, as the Python package does.
 
 ## Use
 
@@ -75,10 +78,10 @@ one page per task) and hands back each file's pages in input order.
 |---|---|
 | `INDRA_OCR_MODEL_DIR` | a local model folder (otherwise the Hugging Face cache, then a download of `datalab-to/indra-ocr` v3.1) |
 | `HF_ENDPOINT`, `HF_HOME`, `HF_HUB_CACHE` | as for huggingface_hub (the cache layout is shared with Python) |
-| `PDFIUM_LIB`, `PDFIUM_DYNAMIC_LIB_PATH` | the pdfium library file, or its folder |
+| `PDFIUM_LIB`, `PDFIUM_DYNAMIC_LIB_PATH` | the pdfium library file, or its folder (feature `pdfium`) |
 | `ORT_DYLIB_PATH` | the ONNX Runtime library (for `--engine ort`) |
 | `INDRA_FORCE_ISA` | `avx512`, `avx2`, `neon` or `scalar`: use narrower kernels than the CPU allows |
-| `INDRA_OCR_PDFIUM_COPIES=0` | share one pdfium between workers (see below) |
+| `INDRA_OCR_PDFIUM_COPIES=0` | share one pdfium between workers (feature `pdfium`, see below) |
 
 ## How it matches the Python package
 
@@ -91,7 +94,11 @@ The pipeline's thresholds were tuned on the exact numbers Python produces, so th
 - **Python and NumPy semantics**: `str.isalpha`/`isdigit`/`isspace`/... and `unicodedata` from tables
   generated with Python (`tools/gen_unicode_tables.py`), `round` (half to even), `np.median`,
   `np.percentile`, NumPy's pairwise float32 summation, `np.arange`, stable-order ties.
-- **pdfium**: the same render call as pypdfium2 and the same text-layer reads.
+- **pdfium** (feature `pdfium`): the same render call as pypdfium2 and the same text-layer reads. The
+  default reader (hayro) reports the text layer the way pdfium does (content order, tight glyph boxes,
+  generated spaces and line breaks; boxes agree within 0.1 pt), but its antialiasing differs, so line
+  boxes detected on a page can move a few pixels and the output is close to, not identical with,
+  Python's.
 - **The models**: each native model is tested against ONNX Runtime (`tests/native_vs_ort.rs`): the
   recognizer's classes agree on all 442,620 timesteps of the test pages, detector boxes within 0.01 px.
   Where ONNX Runtime's result depends on batching (the line classifiers and the math encoder see the
@@ -128,11 +135,13 @@ Python package: `tools/gen_cv_golden.py`, `tools/gen_imread_golden.py`, `tools/d
   count is one per physical core (SMT siblings only add contention to kernels that already keep the
   vector units busy); `--cores` overrides it.
 
-### pdfium and threads
+### PDFs and threads
 
-pdfium is not thread-safe, and its state is per loaded library. Each parallel worker therefore loads a
-private copy of the pdfium library file (copied to a temporary folder and removed once loaded), so pages
-render in parallel within one process, as the Python package's worker processes do.
+With the default reader each open document is self-contained, so workers render in parallel with no
+shared state. pdfium (feature `pdfium`) is not thread-safe, and its state is per loaded library. Each
+parallel worker therefore loads a private copy of the pdfium library file (copied to a temporary folder
+and removed once loaded), so pages render in parallel within one process, as the Python package's worker
+processes do.
 
 ## Benchmarks
 

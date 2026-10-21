@@ -13,7 +13,9 @@ workspace = true
 default = ["ort", "native", "pdf", "download"]
 native = ["dep:indra-engine"]
 ort = ["dep:ort"]
-pdf = ["dep:libloading"]
+# PDFs in pure Rust (hayro); with `pdfium`, through the pdfium library instead
+pdf = ["dep:hayro"]
+pdfium = ["pdf", "dep:libloading"]
 download = ["dep:hf-hub"]
 
 [dependencies]
@@ -24,6 +26,7 @@ rayon.workspace = true
 indra-engine = { workspace = true, optional = true }
 ort = { version = "=2.0.0-rc.14", default-features = false, features = ["load-dynamic", "std", "ndarray"], optional = true }
 libloading = { version = "0.8", optional = true }
+hayro = { version = "0.8", optional = true }
 hf-hub = { version = "0.4", default-features = false, features = ["ureq", "rustls-tls"], optional = true }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "tiff", "bmp", "webp", "gif", "pnm"] }
 tiff = "0.11"

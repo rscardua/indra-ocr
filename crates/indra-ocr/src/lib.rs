@@ -17,7 +17,11 @@ pub mod order_post;
 #[cfg(feature = "ort")]
 pub mod ort_backend;
 pub mod parallel;
-#[cfg(feature = "pdf")]
+#[cfg(feature = "pdfium")]
+pub mod pdfium;
+// ponytail: the native backend keeps the module name, so callers need no cfg of their own
+#[cfg(all(feature = "pdf", not(feature = "pdfium")))]
+#[path = "pdfnative.rs"]
 pub mod pdfium;
 pub mod pipeline;
 pub mod py;
